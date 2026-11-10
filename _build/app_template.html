@@ -722,7 +722,13 @@ async function gh(path,opt){
   try{ r=await fetch('https://api.github.com'+path,Object.assign({},opt,{headers:h,signal:ctl.signal})); }
   catch(e){ throw new Error(e.name==='AbortError'?'请求超时':e.message); }
   finally{ clearTimeout(timer); }
-  if(!r.ok){ let t=''; try{ t=await r.text(); }catch(e){} throw new Error('HTTP '+r.status+(t?' · '+t.slice(0,60):'')); }
+  if(!r.ok){
+    let t=''; try{ t=await r.text(); }catch(e){}
+    const e=new Error('HTTP '+r.status+(t?' · '+t.slice(0,60):''));
+    e.status=r.status;
+    e.reset=parseInt(r.headers.get('x-ratelimit-reset')||'0',10)||0;
+    throw e;
+  }
   return r.status===204?null:r.json();
 }
 function mergeState(a,b){
@@ -741,6 +747,8 @@ function mergeState(a,b){
 }
 async function doSync(silent){
   if(!syncReady()||syncing) return;
+  if(syncBlocked()){ if(!silent) toast('接口限流中，稍后自动恢复'); return; }
+  lastAttempt=Date.now();
   syncing=true;
   if(view==='stats') render();
   try{
@@ -749,23 +757,36 @@ async function doSync(silent){
     let remote=null;
     if(f&&f.content){ try{ remote=JSON.parse(f.content); }catch(e){} }
     if(remote&&remote.v===1) S=mergeState(S,remote);
-    try{ localStorage.setItem(KEY,JSON.stringify(S)); }catch(e){}
-    const payload={files:{}};
-    payload.files[SYNC_FILE]={content:JSON.stringify(S)};
-    await gh('/gists/'+sync.gistId,{method:'PATCH',body:JSON.stringify(payload)});
-    sync.last=Date.now(); saveSync();
+    const local=JSON.stringify(S);
+    try{ localStorage.setItem(KEY,local); }catch(e){}
+    if(!remote||JSON.stringify(remote)!==local){
+      const payload={files:{}};
+      payload.files[SYNC_FILE]={content:local};
+      await gh('/gists/'+sync.gistId,{method:'PATCH',body:JSON.stringify(payload)});
+    }
+    sync.last=Date.now(); sync.blockUntil=0; saveSync();
     if(!silent) toast('已与云端同步');
   }catch(e){
-    if(!silent) toast('同步失败：'+e.message);
+    if(e.status===403||e.status===429){
+      const reset=e.reset?e.reset*1000:Date.now()+15*60*1000;
+      sync.blockUntil=reset; saveSync();
+      const t=new Date(reset).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
+      toast('GitHub 接口限流了，'+t+' 后自动恢复；本机记录不受影响');
+    }else if(!silent){
+      toast('同步失败：'+e.message);
+    }
   }finally{
     syncing=false;
     if(view==='stats') render();
   }
 }
+function syncBlocked(){ return sync.blockUntil&&sync.blockUntil>Date.now(); }
+let lastAttempt=0;
 function scheduleSync(){
-  if(!syncReady()||sync.auto===false) return;
+  if(!syncReady()||sync.auto===false||syncBlocked()) return;
   clearTimeout(syncTimer);
-  syncTimer=setTimeout(function(){ doSync(true); },4000);
+  const wait=Math.max(8000, 25000-(Date.now()-lastAttempt));
+  syncTimer=setTimeout(function(){ doSync(true); },wait);
 }
 async function connectSync(token){
   sync={token:token,auto:true};
@@ -797,9 +818,11 @@ function syncHTML(){
       '<div class="btns2" style="margin-top:2px"><button class="ghost" data-act="syncCancel">取消</button><button class="primary" data-act="syncConnect">连接并同步</button></div>'+
       '<p class="hint" style="margin:10px 0 0">令牌只保存在这台设备的浏览器里，不会写进备份文件。手机和电脑各填一次即可。</p>';
   }else if(on){
-    const st=syncing?'同步中…':(sync.last?'上次同步 '+timeAgo(sync.last):'尚未同步');
-    inner='<div class="syncstate"><span class="dot'+(syncing?'':' ok')+'"></span><span>已连接 '+esc(sync.user||'')+' · '+st+'</span></div>'+
-      '<div class="btns2" style="margin-top:0"><button class="ghost" data-act="syncNow">立即同步</button><button class="ghost" data-act="syncOff">关闭同步</button></div>'+
+    const blocked=syncBlocked();
+    const bt=blocked?new Date(sync.blockUntil).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'';
+    const st=blocked?('接口限流，'+bt+' 后自动恢复'):(syncing?'同步中…':(sync.last?'上次同步 '+timeAgo(sync.last):'尚未同步'));
+    inner='<div class="syncstate"><span class="dot'+(syncing||blocked?'':' ok')+'"></span><span>已连接 '+esc(sync.user||'')+' · '+st+'</span></div>'+
+      '<div class="btns2" style="margin-top:0"><button class="ghost" data-act="syncNow"'+(blocked?' disabled':'')+'>立即同步</button><button class="ghost" data-act="syncOff">关闭同步</button></div>'+
       '<div class="syncrow"><span>自动同步</span><button class="switch'+(sync.auto!==false?' on':'')+'" data-act="syncToggle" aria-label="自动同步"></button></div>'+
       '<p class="hint" style="margin:8px 0 0">统计数字以答题次数较多的设备为准；错题、进度按最新记录合并。</p>';
   }else{
@@ -1020,7 +1043,7 @@ document.addEventListener('keydown',function(e){
 render();
 if(syncReady()&&sync.auto!==false) setTimeout(function(){ doSync(true); },1500);
 document.addEventListener('visibilitychange',function(){
-  if(document.visibilityState==='visible'&&syncReady()&&sync.auto!==false) doSync(true);
+  if(document.visibilityState==='visible'&&syncReady()&&sync.auto!==false&&Date.now()-lastAttempt>60000) doSync(true);
 });
 })();
 </script>
