@@ -379,7 +379,10 @@ window.__RDS={
   banks:BANKS, state:function(){return S;},
   cur:function(){ if(!session) return null; const q=curQ();
     return {id:q.id,type:q.type,ans:q.ans,n:q.n,opts:q.opts.map(function(o){return o[0];}),submitted:session.submitted,sel:Array.from(session.sel)}; },
-  view:function(){return view;}
+  view:function(){return view;},
+  syncNow:function(){ return doSync(false); },
+  syncCfg:function(){ return sync; },
+  ghCall:function(p,o){ return gh(p,o); }
 };
 
 function toast(msg){
@@ -699,7 +702,12 @@ function timeAgo(t){
 async function gh(path,opt){
   opt=opt||{};
   const h=Object.assign({'Accept':'application/vnd.github+json','Authorization':'Bearer '+sync.token},opt.headers||{});
-  const r=await fetch('https://api.github.com'+path,Object.assign({},opt,{headers:h}));
+  const ctl=new AbortController();
+  const timer=setTimeout(function(){ ctl.abort(); },15000);
+  let r;
+  try{ r=await fetch('https://api.github.com'+path,Object.assign({},opt,{headers:h,signal:ctl.signal})); }
+  catch(e){ throw new Error(e.name==='AbortError'?'请求超时':e.message); }
+  finally{ clearTimeout(timer); }
   if(!r.ok){ let t=''; try{ t=await r.text(); }catch(e){} throw new Error('HTTP '+r.status+(t?' · '+t.slice(0,60):'')); }
   return r.status===204?null:r.json();
 }
@@ -720,6 +728,7 @@ function mergeState(a,b){
 async function doSync(silent){
   if(!syncReady()||syncing) return;
   syncing=true;
+  if(view==='stats') render();
   try{
     const g=await gh('/gists/'+sync.gistId);
     const f=g.files&&g.files[SYNC_FILE];
@@ -731,11 +740,13 @@ async function doSync(silent){
     payload.files[SYNC_FILE]={content:JSON.stringify(S)};
     await gh('/gists/'+sync.gistId,{method:'PATCH',body:JSON.stringify(payload)});
     sync.last=Date.now(); saveSync();
-    if(view==='stats') render();
     if(!silent) toast('已与云端同步');
   }catch(e){
     if(!silent) toast('同步失败：'+e.message);
-  }finally{ syncing=false; }
+  }finally{
+    syncing=false;
+    if(view==='stats') render();
+  }
 }
 function scheduleSync(){
   if(!syncReady()||sync.auto===false) return;
@@ -772,7 +783,8 @@ function syncHTML(){
       '<div class="btns2" style="margin-top:2px"><button class="ghost" data-act="syncCancel">取消</button><button class="primary" data-act="syncConnect">连接并同步</button></div>'+
       '<p class="hint" style="margin:10px 0 0">令牌只保存在这台设备的浏览器里，不会写进备份文件。手机和电脑各填一次即可。</p>';
   }else if(on){
-    inner='<div class="syncstate"><span class="dot ok"></span><span>已连接 '+esc(sync.user||'')+' · '+(sync.last?'上次同步 '+timeAgo(sync.last):'尚未同步')+'</span></div>'+
+    const st=syncing?'同步中…':(sync.last?'上次同步 '+timeAgo(sync.last):'尚未同步');
+    inner='<div class="syncstate"><span class="dot'+(syncing?'':' ok')+'"></span><span>已连接 '+esc(sync.user||'')+' · '+st+'</span></div>'+
       '<div class="btns2" style="margin-top:0"><button class="ghost" data-act="syncNow">立即同步</button><button class="ghost" data-act="syncOff">关闭同步</button></div>'+
       '<div class="syncrow"><span>自动同步</span><button class="switch'+(sync.auto!==false?' on':'')+'" data-act="syncToggle" aria-label="自动同步"></button></div>'+
       '<p class="hint" style="margin:8px 0 0">统计数字以答题次数较多的设备为准；错题、进度按最新记录合并。</p>';
