@@ -83,8 +83,8 @@
 _build/
 ├── app_template.html   # 页面模板（样式 + 逻辑，__DATA__ 占位）
 ├── data.json           # 解析后的题库数据
-├── dan.txt / duo.txt / tf.txt      # 从 docx 提取的纯文本
-└── build.py            # 重新生成 index.html
+├── build.py            # 重新生成 index.html
+└── deploy.py           # 构建 + 发布到 GitHub Pages
 ```
 
 修改模板或数据后执行：
@@ -93,7 +93,17 @@ _build/
 python3 _build/build.py
 ```
 
-会生成根目录的 `index.html`（单文件，内联全部数据与样式）。
+会生成 `index.html`（单文件，内联全部数据与样式）。
+
+## 发布更新
+
+```bash
+python3 _build/deploy.py
+```
+
+一条命令完成：重建 → 与远端逐个文件比对 → 只提交变化 → 等 Pages 刷新为同一份文件。
+脚本走 `api.github.com`，不依赖 `git push`。令牌从环境变量 `GH_TOKEN` 或 macOS 钥匙串
+（service `rudang-quiz-deploy`）读取，不进代码、不进仓库。
 
 ## 目录结构
 
