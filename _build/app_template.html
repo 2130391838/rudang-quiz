@@ -255,6 +255,22 @@
     body{background:
       radial-gradient(60% 40% at 50% 0%, color-mix(in srgb,var(--red) 5%,transparent), transparent 70%),var(--bg)}
   }
+
+  /* ---------- sync ---------- */
+  .syncbox{padding:16px}
+  .syncbox .hint{font-size:12.5px;line-height:1.7;color:var(--muted);margin:0 0 12px}
+  .syncbox .hint b{color:var(--ink);font-weight:600}
+  .syncbox input{width:100%;padding:12px 13px;border-radius:12px;border:1.5px solid var(--line);background:var(--bg);color:var(--ink);font:inherit;font-size:14px;margin-bottom:10px;outline:none}
+  .syncbox input:focus{border-color:var(--red)}
+  .syncstate{display:flex;align-items:center;gap:8px;font-size:13.5px;margin-bottom:12px;color:var(--ink)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none}
+  .dot.ok{background:var(--green)}
+  .syncrow{display:flex;align-items:center;justify-content:space-between;margin-top:12px;padding-top:12px;border-top:1px solid var(--line);font-size:14px}
+  .switch{width:46px;height:27px;border-radius:14px;background:var(--line);position:relative;transition:background .2s;flex:none}
+  .switch::after{content:'';position:absolute;left:3px;top:3px;width:21px;height:21px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:left .2s}
+  .switch.on{background:var(--red)}
+  .switch.on::after{left:22px}
+  .wide{width:100%}
 </style>
 </head>
 <body>
@@ -330,6 +346,7 @@ let saveWarned=false;
 function save(){
   try{ localStorage.setItem(KEY,JSON.stringify(S)); }
   catch(e){ if(!saveWarned){ saveWarned=true; toast('浏览器无法保存进度，请勿使用无痕模式'); } }
+  if(!syncing) scheduleSync();
 }
 function todayKey(d){
   const t=d||new Date();
@@ -663,6 +680,110 @@ function wrongHTML(){
   '</div>';
 }
 
+/* ==================== sync ==================== */
+const SKEY='rds.sync.v1';
+const SYNC_DESC='rudang-quiz-progress-v1';
+const SYNC_FILE='rudang-progress.json';
+let sync={};
+try{ sync=JSON.parse(localStorage.getItem(SKEY)||'{}')||{}; }catch(e){ sync={}; }
+let syncing=false, syncPanel=false, syncTimer=null;
+function saveSync(){ try{ localStorage.setItem(SKEY,JSON.stringify(sync)); }catch(e){} }
+function syncReady(){ return !!(sync.token&&sync.gistId); }
+function timeAgo(t){
+  const d=Math.floor((Date.now()-t)/1000);
+  if(d<60) return '刚刚';
+  if(d<3600) return Math.floor(d/60)+' 分钟前';
+  if(d<86400) return Math.floor(d/3600)+' 小时前';
+  return Math.floor(d/86400)+' 天前';
+}
+async function gh(path,opt){
+  opt=opt||{};
+  const h=Object.assign({'Accept':'application/vnd.github+json','Authorization':'Bearer '+sync.token},opt.headers||{});
+  const r=await fetch('https://api.github.com'+path,Object.assign({},opt,{headers:h}));
+  if(!r.ok){ let t=''; try{ t=await r.text(); }catch(e){} throw new Error('HTTP '+r.status+(t?' · '+t.slice(0,60):'')); }
+  return r.status===204?null:r.json();
+}
+function mergeState(a,b){
+  const o=JSON.parse(JSON.stringify(a));
+  o.rec=o.rec||{}; o.seen=o.seen||{}; o.days=o.days||{}; o.cursor=o.cursor||{};
+  o.stats=o.stats||{attempts:0,correct:0};
+  Object.keys(b.rec||{}).forEach(function(id){
+    const x=b.rec[id], y=o.rec[id];
+    if(!y || (x.ts||0)>(y.ts||0) || ((x.ts||0)===(y.ts||0) && (x.r||0)>(y.r||0))) o.rec[id]=x;
+  });
+  Object.keys(b.seen||{}).forEach(function(id){ o.seen[id]=1; });
+  Object.keys(b.days||{}).forEach(function(k){ o.days[k]=Math.max(o.days[k]||0,b.days[k]||0); });
+  Object.keys(b.cursor||{}).forEach(function(k){ o.cursor[k]=Math.max(o.cursor[k]||0,b.cursor[k]||0); });
+  if((b.stats.attempts||0)>(o.stats.attempts||0)) o.stats=b.stats;
+  return o;
+}
+async function doSync(silent){
+  if(!syncReady()||syncing) return;
+  syncing=true;
+  try{
+    const g=await gh('/gists/'+sync.gistId);
+    const f=g.files&&g.files[SYNC_FILE];
+    let remote=null;
+    if(f&&f.content){ try{ remote=JSON.parse(f.content); }catch(e){} }
+    if(remote&&remote.v===1) S=mergeState(S,remote);
+    try{ localStorage.setItem(KEY,JSON.stringify(S)); }catch(e){}
+    const payload={files:{}};
+    payload.files[SYNC_FILE]={content:JSON.stringify(S)};
+    await gh('/gists/'+sync.gistId,{method:'PATCH',body:JSON.stringify(payload)});
+    sync.last=Date.now(); saveSync();
+    if(view==='stats') render();
+    if(!silent) toast('已与云端同步');
+  }catch(e){
+    if(!silent) toast('同步失败：'+e.message);
+  }finally{ syncing=false; }
+}
+function scheduleSync(){
+  if(!syncReady()||sync.auto===false) return;
+  clearTimeout(syncTimer);
+  syncTimer=setTimeout(function(){ doSync(true); },4000);
+}
+async function connectSync(token){
+  sync={token:token,auto:true};
+  try{
+    const u=await gh('/user');
+    sync.user=u.login||'';
+    const list=await gh('/gists?per_page=100');
+    let g=(list||[]).filter(function(x){return x.description===SYNC_DESC;})[0];
+    if(!g){
+      const body={description:SYNC_DESC,public:false,files:{}};
+      body.files[SYNC_FILE]={content:JSON.stringify(S)};
+      g=await gh('/gists',{method:'POST',body:JSON.stringify(body)});
+    }
+    sync.gistId=g.id; syncPanel=false; saveSync(); render();
+    await doSync(false);
+  }catch(e){
+    sync={}; saveSync();
+    toast('连接失败：'+e.message);
+    syncPanel=true; render();
+  }
+}
+function syncHTML(){
+  const on=syncReady();
+  let inner;
+  if(syncPanel){
+    inner='<p class="hint">需要一个只勾选 <b>gist</b> 的 GitHub 令牌（不是账号密码）。'+
+      '<a href="https://github.com/settings/tokens/new?scopes=gist&amp;description=rudang-quiz-sync" target="_blank" rel="noopener">去创建 →</a></p>'+
+      '<input id="syncToken" type="password" placeholder="粘贴 ghp_… 或 github_pat_…" autocomplete="off" spellcheck="false">'+
+      '<div class="btns2" style="margin-top:2px"><button class="ghost" data-act="syncCancel">取消</button><button class="primary" data-act="syncConnect">连接并同步</button></div>'+
+      '<p class="hint" style="margin:10px 0 0">令牌只保存在这台设备的浏览器里，不会写进备份文件。手机和电脑各填一次即可。</p>';
+  }else if(on){
+    inner='<div class="syncstate"><span class="dot ok"></span><span>已连接 '+esc(sync.user||'')+' · '+(sync.last?'上次同步 '+timeAgo(sync.last):'尚未同步')+'</span></div>'+
+      '<div class="btns2" style="margin-top:0"><button class="ghost" data-act="syncNow">立即同步</button><button class="ghost" data-act="syncOff">关闭同步</button></div>'+
+      '<div class="syncrow"><span>自动同步</span><button class="switch'+(sync.auto!==false?' on':'')+'" data-act="syncToggle" aria-label="自动同步"></button></div>'+
+      '<p class="hint" style="margin:8px 0 0">统计数字以答题次数较多的设备为准；错题、进度按最新记录合并。</p>';
+  }else{
+    inner='<p class="hint">在手机和电脑上刷同一份题，进度自动接续。开启后进度会同步到你的一个私有 Gist。</p>'+
+      '<button class="ghost wide" data-act="syncSetup">开启多设备同步</button>';
+  }
+  return '<div class="block"><div class="sec"><h2>多设备同步</h2><span>'+(on?'已开启':'未开启')+'</span></div>'+
+    '<div class="card syncbox">'+inner+'</div></div>';
+}
+
 /* ==================== stats ==================== */
 function streakDays(){
   let n=0; const d=new Date();
@@ -726,6 +847,7 @@ function statsHTML(){
       '</div>'+
       '<input type="file" id="importFile" accept=".json,application/json" hidden>'+
     '</div>'+
+    syncHTML()+
     '<div class="danger-zone"><button class="linkbtn" data-act="resetAll">清空所有答题记录</button></div>'+
   '</div>';
 }
@@ -803,6 +925,20 @@ const actions={
     toast('备份已导出');
   },
   importData:function(){ const f=document.getElementById('importFile'); if(f) f.click(); },
+  syncSetup:function(){ syncPanel=true; render(); },
+  syncCancel:function(){ syncPanel=false; render(); },
+  syncConnect:function(){
+    const el=document.getElementById('syncToken');
+    const t=(el&&el.value||'').trim();
+    if(!t){ toast('请先粘贴令牌'); return; }
+    connectSync(t);
+  },
+  syncNow:function(){ doSync(false); },
+  syncToggle:function(){ sync.auto=sync.auto===false; saveSync(); render(); if(sync.auto) doSync(true); },
+  syncOff:function(){
+    if(!confirm('关闭同步？本机进度不会被删除，云端 Gist 也会保留。')) return;
+    sync={}; saveSync(); render(); toast('已关闭同步');
+  },
   resetAll:function(){
     if(!confirm('确定清空所有答题记录、错题和统计？此操作不可撤销。')) return;
     S=defState(); save(); render(); toast('已清空');
@@ -854,6 +990,10 @@ document.addEventListener('keydown',function(e){
   document.documentElement.setAttribute('data-theme',t);
 })();
 render();
+if(syncReady()&&sync.auto!==false) setTimeout(function(){ doSync(true); },1500);
+document.addEventListener('visibilitychange',function(){
+  if(document.visibilityState==='visible'&&syncReady()&&sync.auto!==false) doSync(true);
+});
 })();
 </script>
 </body>
