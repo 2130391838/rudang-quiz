@@ -393,6 +393,12 @@ function toast(msg){
 }
 
 /* ==================== home ==================== */
+function firstUnseenIn(list){
+  for(let i=0;i<list.length;i++){ if(!S.seen[list[i].id]) return i; }
+  return 0;
+}
+function firstUnseenBank(k){ return firstUnseenIn(BANKS[k]); }
+
 function homeHTML(){
   const attempts=S.stats.attempts||0;
   const acc=attempts?Math.round((S.stats.correct||0)/attempts*100):0;
@@ -401,7 +407,7 @@ function homeHTML(){
   const banks=ORDER.map(function(k){
     const n=BANKS[k].length, sn=seenCount(k), pct=Math.round(sn/n*100);
     const bk=BANKS[k].filter(function(q){const r=S.rec[q.id];return r&&r.book;}).length;
-    const cur=S.cursor[k]||0;
+    const cur=firstUnseenBank(k), allDone=sn>=n;
     return ''+
     '<div class="bank '+(picked.has(k)?'on':'')+'" data-act="toggleBank" data-k="'+k+'">'+
       '<div class="tick">✓</div>'+
@@ -409,7 +415,7 @@ function homeHTML(){
       '<div class="num mono">'+n+'<small>题</small></div>'+
       '<div class="foot">已练 '+sn+' · 错题 '+bk+'</div>'+
       '<div class="prog"><i style="width:'+pct+'%"></i></div>'+
-      (cur>0?'<div class="resume" data-act="resume" data-k="'+k+'">继续第'+(cur+1)+'题</div>':'')+
+      (cur>0&&!allDone?'<div class="resume" data-act="resume" data-k="'+k+'">继续第'+(cur+1)+'题</div>':'')+
     '</div>';
   }).join('');
 
@@ -441,7 +447,11 @@ function homeHTML(){
       '</div>'+
     '</div>'+
     '<div class="row" style="margin-top:14px"><div class="lab">题量</div><div class="chips">'+sizes+'</div></div>'+
-    '<button class="primary big" data-act="start">开始刷题</button>'+
+    (function(){
+      let left=0;
+      ORDER.forEach(function(k){ if(picked.has(k)) left+=BANKS[k].filter(function(q){return !S.seen[q.id];}).length; });
+      return '<button class="primary big" data-act="start">开始刷题'+(left?' · 还剩 '+left+' 题没练':' · 全部练过')+'</button>';
+    })()+
     '<div class="btns2">'+
       '<button class="ghost" data-act="goWrong">错题本'+(bc?' · '+bc:'')+'</button>'+
       '<button class="ghost" data-act="goStats">学习统计</button>'+
@@ -457,23 +467,25 @@ function curQ(){ return session.qs[session.i]; }
 
 function startSession(qs,meta){
   if(!qs.length){ toast('没有可练的题目'); return; }
-  session=Object.assign({qs:qs,i:0,sel:new Set(),submitted:false,right:0,wrong:0,results:[],t0:Date.now()},meta||{});
+  session=Object.assign({qs:qs,i:0,sel:new Set(),submitted:false,right:0,wrong:0,results:[],t0:Date.now(),startNo:1,totalAll:qs.length},meta||{});
+  session.totalAll=session.totalAll||qs.length;
   view='quiz'; render(); window.scrollTo(0,0);
+}
+
+function poolFor(banks){
+  let pool=banks.reduce(function(a,k){return a.concat(BANKS[k]);},[]);
+  if(mode==='random') pool=shuffle(pool);
+  const fresh=pool.filter(function(q){return !S.seen[q.id];});
+  if(fresh.length) return {list:fresh,fresh:true};
+  return {list:pool,fresh:false};
 }
 
 function startFromHome(){
   const banks=ORDER.filter(function(k){return picked.has(k);});
   if(!banks.length){ toast('先选择至少一个题库'); return; }
-  let qs;
-  if(mode==='random'){
-    qs=shuffle(banks.reduce(function(a,k){return a.concat(BANKS[k]);},[]));
-  }else if(banks.length===1){
-    const arr=BANKS[banks[0]], st=S.cursor[banks[0]]||0;
-    qs=arr.slice(st).concat(arr.slice(0,st));
-  }else{
-    qs=banks.reduce(function(a,k){return a.concat(BANKS[k]);},[]);
-  }
-  qs=qs.slice(0,size||qs.length);
+  const pool=poolFor(banks);
+  const qs=pool.list.slice(0,size||pool.list.length);
+  if(!pool.fresh) toast('这些题都练过了，来一轮复习');
   startSession(qs,{mode:mode,banks:banks});
 }
 
@@ -507,7 +519,9 @@ function feedbackHTML(q){
 }
 
 function quizHTML(){
-  const q=curQ(), i=session.i, total=session.qs.length, pct=Math.round(i/total*100);
+  const q=curQ(), i=session.i, total=session.qs.length;
+  const pos=i+1, all=total;
+  const pct=Math.round(i/total*100);
   const opts=q.opts.map(function(o){
     return '<button class="'+optClass(q,o[0])+'" data-act="opt" data-l="'+o[0]+'">'+
       '<span class="k">'+o[0]+'</span><span class="t">'+esc(o[1])+'</span></button>';
@@ -518,12 +532,12 @@ function quizHTML(){
   '<div class="quizbar"><div class="in">'+
     '<button class="qback" data-act="quit">‹</button>'+
     '<div class="qprog"><i style="width:'+pct+'%"></i></div>'+
-    '<div class="qcount mono">'+(i+1)+'/'+total+'</div>'+
+    '<div class="qcount mono">'+pos+'/'+all+'</div>'+
     '<div class="qscore mono"><span class="ok">✓'+session.right+'</span><span class="no">✗'+session.wrong+'</span></div>'+
   '</div></div>'+
   '<div class="quiz fade">'+
     '<div class="qmeta"><span class="tag '+q.type+'">'+NAMES[q.type]+'</span>'+
-      '<span class="qno">第 '+(i+1)+' 题 · 共 '+total+' 题</span></div>'+
+      '<span class="qno">第 '+pos+' 题 · 共 '+all+' 题</span></div>'+
     '<h2 class="stem">'+esc(q.q)+'</h2>'+
     (q.type==='multi'&&!session.submitted?'<div class="hint">选出所有正确选项，选全后再提交</div>':'')+
     '<div class="opts">'+opts+'</div>'+
@@ -889,8 +903,10 @@ const actions={
   start:function(){ startFromHome(); },
   resume:function(el,e){
     e.stopPropagation();
-    const k=el.dataset.k, arr=BANKS[k], st=S.cursor[k]||0;
-    const qs=arr.slice(st).concat(arr.slice(0,st)).slice(0,size||arr.length);
+    const k=el.dataset.k, arr=BANKS[k];
+    const fresh=arr.filter(function(q){return !S.seen[q.id];});
+    const qs=(fresh.length?fresh:arr).slice(0,size||arr.length);
+    if(!fresh.length) toast('「'+NAMES[k]+'」都练过了，来一轮复习');
     startSession(qs,{mode:'order',banks:[k]});
   },
   goWrong:function(){ view='wrong'; render(); },
